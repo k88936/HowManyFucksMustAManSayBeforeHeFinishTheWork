@@ -1,8 +1,8 @@
-"""Unit tests for the shared counting logic."""
-
 import unittest
 
-from shared import count_occurrences
+from shared import (
+    count_occurrences,
+)
 
 
 class CountOccurrencesTest(unittest.TestCase):
@@ -23,7 +23,6 @@ class CountOccurrencesTest(unittest.TestCase):
 
     def test_empty_word_counts_nothing(self) -> None:
         self.assertEqual(count_occurrences("whatever fuck", ""), 0)
-
 
 if __name__ == "__main__":
     unittest.main()

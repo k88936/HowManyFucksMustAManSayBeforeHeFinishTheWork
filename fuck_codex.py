@@ -12,7 +12,15 @@ import json
 import sqlite3
 from pathlib import Path
 
-from shared import Counter, render_report
+from shared import (
+    DEFAULT_TOP,
+    Conversation,
+    Counter,
+    Message,
+    export_conversations_markdown,
+    positive_int,
+    render_report,
+)
 
 
 def default_codex_dir() -> Path:
@@ -53,6 +61,16 @@ def extract_user_text(item_json: str) -> str:
     return "\n".join(parts)
 
 
+def extract_agent_text(item_json: str) -> str:
+    """Extract the plain text of an agent reply from a thread_items.item_json blob."""
+    try:
+        data = json.loads(item_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    text = data.get("text")
+    return text if isinstance(text, str) else ""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Count how many times a word appears in the user's Codex thread history."
@@ -76,6 +94,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also print per-thread counts",
     )
+    parser.add_argument(
+        "--top",
+        type=positive_int,
+        metavar="N",
+        help=(
+            "print the N threads with the highest frequency "
+            "(count / user input length)"
+        ),
+    )
+    parser.add_argument(
+        "--md-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "render the top N whole conversations to markdown files in DIR "
+            "(N comes from --top, default: %d)" % DEFAULT_TOP
+        ),
+    )
     return parser
 
 
@@ -86,25 +122,50 @@ def main(argv: list[str] | None = None) -> int:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
-            "SELECT thread_id, item_json FROM thread_items WHERE item_type = 'userMessage'"
+            "SELECT thread_id, item_type, item_json FROM thread_items "
+            "WHERE item_type IN ('userMessage', 'agentMessage') "
+            "ORDER BY thread_id, rollout_ordinal, created_at_ms, item_id"
         ).fetchall()
     finally:
         conn.close()
 
     counter = Counter(args.word)
-    for thread_id, item_json in rows:
-        counter.add(thread_id, extract_user_text(item_json))
+    conversations: dict[str, Conversation] = {}
+    total_messages = 0
+
+    for thread_id, item_type, item_json in rows:
+        conversation = conversations.setdefault(thread_id, Conversation(thread_id))
+        if item_type == "userMessage":
+            text = extract_user_text(item_json)
+            total_messages += 1
+            counter.add(thread_id, text)
+            conversation.messages.append(Message("user", text))
+        else:
+            text = extract_agent_text(item_json)
+            if text:
+                conversation.messages.append(Message("assistant", text))
 
     render_report(
         source_lines=[
             ("Codex data dir", str(args.codex_dir)),
             ("Thread history", str(db_path)),
         ],
-        total_messages=len(rows),
+        total_messages=total_messages,
         counter=counter,
         bucket_label="thread",
         breakdown=args.breakdown,
+        top=args.top,
     )
+
+    if args.md_dir is not None:
+        limit = args.top if args.top is not None else DEFAULT_TOP
+        top_ids = [stat.bucket_id for stat in counter.top_buckets(limit)]
+        written = export_conversations_markdown(
+            conversations, top_ids, args.md_dir, args.word
+        )
+        print(f"\nRendered {len(written)} conversation(s) to {args.md_dir}:")
+        for path in written:
+            print(f"  {path}")
 
     return 0
 
